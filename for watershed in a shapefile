@@ -1,0 +1,157 @@
+
+
+####################### Watershed Land Use Percentages Calculator #####################
+
+############ Set up ###########
+import arcpy 
+import os, sys
+import csv
+import numpy as np
+import pandas as pd
+
+#test that arcpy is working properly
+# print("Python version:", sys.version)
+# print("ArcGIS version:", arcpy.GetInstallInfo()['Version'])
+# print("Python executable:", sys.executable)
+
+#########Input/output:
+workspace = r'C:\Users\s196t023\OneDrive - University of Kansas\Robust Incentives Project\! Final, clean datasets\Scripts'
+output_folder = r'C:\Users\s196t023\OneDrive - University of Kansas\Robust Incentives Project\! Final, clean datasets\Data\2011 NLCD Land use fracs - Co, Ch, Ls - 5.15.25\6_30_25 corrected land use fracs'
+arcpy.env.workspace = workspace 
+arcpy.env.overwriteOutput = True
+
+if not os.path.exists(output_folder):
+    os.makedirs(output_folder)
+
+
+############# Input and output ##########
+
+##### If looping through watersheds in a shapefile:
+watershed_shapefile = r"C:\Users\s196t023\OneDrive - University of Kansas\Robust Incentives Project\Le Sueur ArcPy analysis\data\directly_contributing_LS_areas1\watershed_areas_MNRiver_allbasins_QCed_4_25_16.shp"  # Path to the shapefile containing watershed polygons
+
+#### land use raster, either way:
+nlcd_raster = r"C:\Users\s196t023\OneDrive - University of Kansas\Robust Incentives Project\Le Sueur ArcPy analysis\data\Land cover\NLCD 2011 - Land Cover.lyr" #MLCC 2013
+watershed_landuse_raster = r"insert your path with desired file name.tif"
+  
+
+
+def clip_landuse_raster(individual_watershed_polygon, site_id, land_use_raster, output_folder ):
+
+    InRas1 = land_use_raster #global raster path
+    InMsk1 = individual_watershed_polygon
+
+    output_raster_path = os.path.join(output_folder, f"clipped_landuse_{site_id}.tif")
+
+    landuse_selected_watershed = arcpy.sa.ExtractByMask(InRas1, InMsk1, "INSIDE")
+    landuse_selected_watershed.save(output_raster_path)
+
+    print(f"Raster saved successfully to {watershed_landuse_raster}")
+
+    return output_raster_path
+
+def calculate_landuse_percentage(individual_watershed_raster):
+    """
+    Calculates the percentage of land use categories based on the raster's attribute table.
+    
+    Parameters:
+        individual_watershed_raster (str): Path to a clipped watershed raster with Value and Count fields.
+
+    Returns:
+        pd.DataFrame: Single-row DataFrame with percent land use for each category.
+    """
+    import pandas as pd
+    import numpy as np
+    import arcpy
+
+    # Define land cover groupings
+    landuse_mapping = {
+        "Urban": [22, 23, 24], 
+        "Barren": [21, 31],
+        "Cropland": [82],
+        "Vegetated_Nonag": [81, 52, 71, 72, 73, 74],
+        "Open water": [11],
+        "Wetlands": [90, 95],
+        "Forest and shrubs": [41, 42, 43, 51, 52]
+    }
+
+    # Get the attribute table (Value and Count columns)
+    arr = arcpy.da.TableToNumPyArray(individual_watershed_raster, ['Value', 'Count'])
+
+    # Turn into a DataFrame for ease of processing
+    df = pd.DataFrame(arr)
+
+    # Get total pixel count
+    total_pixels = df['Count'].sum()
+
+    # Calculate percentage for each land use category
+    result = {}
+    for category, nlcd_codes in landuse_mapping.items():
+        cat_count = df[df['Value'].isin(nlcd_codes)]['Count'].sum()
+        result[category] = round(100 * cat_count / total_pixels, 2)
+
+    # Handle "Other" category (NLCD classes not mapped)
+    all_known_values = [code for codes in landuse_mapping.values() for code in codes]
+    other_count = df[~df['Value'].isin(all_known_values)]['Count'].sum()
+    result['Other'] = round(100 * other_count / total_pixels, 2)
+
+    return pd.DataFrame([result])
+
+
+def calc_percentages_in_loop_for_watershed_in_watersheds(DA_shapefile, land_cover_raster, output_folder, csv_output_path):
+    """
+    Loops through each watershed in the shapefile, clips the land use raster,
+    calculates percent land use categories, and saves results to CSV.
+
+    Parameters:
+        DA_shapefile (str): Path to shapefile with SiteID field.
+        land_cover_raster (str): Path to full NLCD raster.
+        output_folder (str): Where to store clipped rasters.
+        csv_output_path (str): Where to save the final land use percentages CSV.
+    
+    Returns:
+        dict: Nested dictionary of SiteID -> land use percentages
+    """
+    arcpy.CheckOutExtension("Spatial")
+
+    land_use_percentages = {}
+
+    with arcpy.da.SearchCursor(DA_shapefile, ['Name', 'SHAPE@']) as cursor:
+        for row in cursor:
+            site_id = row[0]
+            shape = row[1]
+
+            print(f"Processing SiteID: {site_id}")
+
+            # Create in-memory feature layer for clipping
+            temp_fc = "in_memory/temp_fc"
+            if arcpy.Exists(temp_fc):
+                arcpy.Delete_management(temp_fc)
+            arcpy.CopyFeatures_management(shape, temp_fc)
+
+            # Clip the raster and calculate percentages
+            clipped_raster_path = clip_landuse_raster(temp_fc, site_id, land_cover_raster, output_folder)
+            percentages_df = calculate_landuse_percentage(clipped_raster_path)
+
+            # Save the results
+            land_use_percentages[site_id] = percentages_df.to_dict(orient='records')[0]
+
+    arcpy.CheckInExtension("Spatial")
+
+    # Convert final dictionary to DataFrame and write to CSV
+    full_df = pd.DataFrame.from_dict(land_use_percentages, orient='index')
+    full_df.index.name = 'SiteID'
+    full_df.reset_index(inplace=True)
+    full_df.to_csv(csv_output_path, index=False)
+
+    print(f"\n✅ Land use percentages saved to: {csv_output_path}")
+    return land_use_percentages
+
+
+
+
+calc_percentages_in_loop_for_watershed_in_watersheds(DA_shapefile = watershed_shapefile,
+                                                     land_cover_raster =  nlcd_raster,
+                                                     output_folder = output_folder, 
+                                                     csv_output_path= os.path.join(output_folder, "land_use_percentages.csv"))
+
+
